@@ -16,6 +16,7 @@ const SetupProbeView = ({ state, actions }) => {
   const {
     stepX, stepY, startX, startY, endX, endY,
     clearanceZ, startZ, endZ, feedrate,
+    skipUnprobed, serpentine,
     probeState, probeProgress, canClick, units,
     validationErrors = {},
   } = state;
@@ -130,6 +131,46 @@ const SetupProbeView = ({ state, actions }) => {
               {validationErrors.feedrate && (
                 <small style={{ color: '#a94442' }}>{validationErrors.feedrate}</small>
               )}
+            </div>
+          </div>
+          <div className="col-xs-12" style={{ marginTop: 5 }}>
+            <div className="checkbox" style={{ marginTop: 0, marginBottom: 5 }}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={!!skipUnprobed}
+                  onChange={actions.handleSkipUnprobedChange}
+                  disabled={isProbing}
+                />
+                {i18n._('Skip points with no contact')}
+                {' '}
+                <Infotip
+                  placement="top"
+                  content={i18n._('Probe with G38.3 instead of G38.2: when a grid point finds no conductive surface (a drilled hole, an already-milled area), nearby spots a quarter step away are probed and the measurement is stored at the original grid node. Only if all nearby spots also fail is the point skipped and later interpolated from its neighbors. The remaining grid is never shifted.')}
+                >
+                  <i className="fa fa-info-circle text-muted" />
+                </Infotip>
+              </label>
+            </div>
+          </div>
+          <div className="col-xs-12">
+            <div className="checkbox" style={{ marginTop: 0, marginBottom: 5 }}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={!!serpentine}
+                  onChange={actions.handleSerpentineChange}
+                  disabled={isProbing}
+                />
+                {i18n._('Zigzag scan path')}
+                {' '}
+                <Infotip
+                  placement="top"
+                  content={i18n._('Probe odd rows right-to-left (serpentine) so the head continues from where the previous row ended instead of rapiding back to the start of X. Same points, same grid, roughly half the travel time.')}
+                >
+                  <i className="fa fa-info-circle text-muted" />
+                </Infotip>
+              </label>
             </div>
           </div>
           <div className="col-xs-6" style={{ paddingLeft: 5 }}>
@@ -285,6 +326,16 @@ const SetupProbeView = ({ state, actions }) => {
           <div style={{ marginTop: 16 }}>
             <div style={{ marginBottom: 8 }}>
               {i18n._('Probing progress: {{current}}/{{total}} points', { current: probeProgress.current, total: probeProgress.total })}
+              {probeProgress.skipped > 0 && (
+                <span style={{ marginLeft: 8, color: '#8a6d3b' }}>
+                  {i18n._('({{skipped}} skipped, no contact)', { skipped: probeProgress.skipped })}
+                </span>
+              )}
+              {probeProgress.retried > 0 && (
+                <span style={{ marginLeft: 8, color: '#31708f' }}>
+                  {i18n._('({{retried}} recovered nearby)', { retried: probeProgress.retried })}
+                </span>
+              )}
             </div>
             <ProgressBar
               bsStyle="info"

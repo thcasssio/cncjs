@@ -436,6 +436,14 @@ class ApplyView extends PureComponent {
                     <span className={styles.infoValue}>{probeStats.points}</span>
                   </div>
                   <div className={styles.infoRow}>
+                    <span className={styles.infoLabel}>{i18n._('Skipped (no contact)')}</span>
+                    <span className={styles.infoValue}>{probeStats.skipped || 0}</span>
+                  </div>
+                  <div className={styles.infoRow}>
+                    <span className={styles.infoLabel}>{i18n._('Recovered nearby:')}</span>
+                    <span className={styles.infoValue}>{probeStats.retried || 0}</span>
+                  </div>
+                  <div className={styles.infoRow}>
                     <span className={styles.infoLabel}>{i18n._('Z-min:')}</span>
                     <span className={styles.infoValue}>{mapPositionToUnits(probeStats.minZ, units)} {toDisplayUnits(units)}</span>
                   </div>

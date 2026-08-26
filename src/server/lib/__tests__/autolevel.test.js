@@ -27,6 +27,31 @@ describe('autolevel', () => {
       ]);
     });
 
+    test('should reverse odd rows when serpentine is enabled', () => {
+      const positions = createProbeXYPoints({
+        startX: 0,
+        endX: 20,
+        stepX: 10,
+        startY: 0,
+        endY: 20,
+        stepY: 10,
+        serpentine: true,
+      });
+
+      expect(positions).toHaveLength(9);
+      expect(positions).toEqual([
+        { x: 0, y: 0 },
+        { x: 10, y: 0 },
+        { x: 20, y: 0 },
+        { x: 20, y: 10 }, // odd row: right to left
+        { x: 10, y: 10 },
+        { x: 0, y: 10 },
+        { x: 0, y: 20 }, // even row: left to right again
+        { x: 10, y: 20 },
+        { x: 20, y: 20 },
+      ]);
+    });
+
     test('should generate points within range when end does not align with step', () => {
       const positions = createProbeXYPoints({
         startX: 0,

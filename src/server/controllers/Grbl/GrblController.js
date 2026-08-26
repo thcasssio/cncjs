@@ -139,10 +139,80 @@ class GrblController {
     // Event Trigger
     event = null;
 
+    // Auto Level - send the probe cycle for the current target.
+    //
+    // Probing runs point by point rather than as one pre-queued program:
+    // the decision of what to send next (advance, retry beside, or give up
+    // and skip) depends on the result of the probe that just finished, and
+    // plain Grbl G-code has no conditionals to express that.
+    //
+    // retryIndex 0 probes the grid node itself; 1..4 probe candidates a
+    // quarter step away (right, left, up, down), clamped to the probe area.
+    // A measurement taken at a retry spot is recorded under the intended
+    // node's XY so the compensation grid stays rectangular; the Z error of
+    // that approximation is bounded by the local slope times a quarter step,
+    // far smaller than the void it replaces.
+    sendAutolevelProbe() {
+      const { probePoints, attempted, retryIndex, config, skipUnprobed } = this.probeState;
+      const point = probePoints[attempted];
+      if (!point || !config) {
+        return;
+      }
+      const { startX, endX, stepX, startY, endY, stepY, clearanceZ, startZ, endZ, feedrate } = config;
+      const clamp = (v, lo, hi) => Math.min(Math.max(v, Math.min(lo, hi)), Math.max(lo, hi));
+      const offsets = [
+        [0, 0],
+        [stepX / 4, 0],
+        [-stepX / 4, 0],
+        [0, stepY / 4],
+        [0, -stepY / 4],
+      ];
+      const [dx, dy] = offsets[Math.min(retryIndex, offsets.length - 1)];
+      const x = clamp(point.x + dx, startX, endX);
+      const y = clamp(point.y + dy, startY, endY);
+      const probeWord = skipUnprobed ? 'G38.3' : 'G38.2';
+      const feed = this.probeState.firstProbeSent ? feedrate : (feedrate / 2);
+      this.probeState.firstProbeSent = true;
+
+      this.command('gcode', [
+        `(Auto Level: point ${attempted}${retryIndex > 0 ? `, retry ${retryIndex}` : ''})`,
+        'G90',
+        `G0 Z${clearanceZ}`,
+        `G0 X${x} Y${y}`,
+        `G0 Z${startZ}`,
+        `${probeWord} Z${endZ} F${feed}`,
+        `G0 Z${clearanceZ}`,
+      ]);
+    }
+
     // Auto Level - Probe state tracking
     probeState = {
       // The probed positions in the form of [{x, y, z}, ...]
       probedPositions: [],
+
+      // Number of probe attempts so far, successful or not. Completion is
+      // judged against this rather than probedPositions.length so that
+      // skipped (no-contact) points still advance the run.
+      attempted: 0,
+
+      // Grid points where the probe found no contact, [{x, y}, ...].
+      // Only ever populated when skipUnprobed is enabled.
+      skippedPoints: [],
+
+      // How many points were recovered by a nearby retry: the node has a
+      // valid Z, but it was measured a quarter step away.
+      retriedCount: 0,
+
+      // When true the run probes with G38.3 (no alarm on failure) and a
+      // point with no contact is retried at nearby spots before being
+      // recorded in skippedPoints, instead of aborting the whole run.
+      skipUnprobed: false,
+
+      // Sequential-probing cursor: which retry candidate of the current
+      // point is in flight (0 = the grid node itself), and whether the very
+      // first probe of the run has been sent (it descends at half feed).
+      retryIndex: 0,
+      firstProbeSent: false,
 
       // The minimum and maximum Z values among the probed positions
       minZ: null,
@@ -745,6 +815,16 @@ class GrblController {
           // [PRB:0.000,0.000,0.000:0]
           // The `PRB:` probe parameter message includes an additional `:` and suffix value is a boolean.
           // It denotes whether the last probe cycle was successful or not.
+          // Sequential probing: each PRB result decides the next command.
+          // `attempted` counts fully-resolved grid points; a retry does not
+          // advance it. The grid the compensation sees is ALWAYS the
+          // original rectangular grid: a measurement taken at a retry spot
+          // is recorded under the intended node's XY, and every following
+          // point is probed at its original grid position.
+          const attempted = this.probeState.attempted ?? this.probeState.probedPositions.length;
+          const probingActive = this.probeState.probePoints.length > 0 &&
+            attempted < this.probeState.probePoints.length;
+
           if (value.result === 1) {
             // $13=1 means Grbl reports positions in inches (including PRB)
             // PRB units follow $13 (firmware setting), NOT G20/G21 modal state
@@ -752,26 +832,37 @@ class GrblController {
 
             // Convert probe result to work coordinates, then to mm
             // Probe data is always stored in mm for consistent compensation math
-            const probedPos = {
+            const measuredPos = {
               x: ensureFiniteNumber(value.x) - Number(wco.x),
               y: ensureFiniteNumber(value.y) - Number(wco.y),
               z: ensureFiniteNumber(value.z) - Number(wco.z),
             };
             if (reportInches) {
-              probedPos.x = in2mm(probedPos.x);
-              probedPos.y = in2mm(probedPos.y);
-              probedPos.z = in2mm(probedPos.z);
+              measuredPos.x = in2mm(measuredPos.x);
+              measuredPos.y = in2mm(measuredPos.y);
+              measuredPos.z = in2mm(measuredPos.z);
             }
 
-            // Track probe data if probing is active
-            log.debug('[autolevel] Checking probe state:', {
-              probePoints: this.probeState.probePoints.length,
-              probedPositions: this.probeState.probedPositions.length,
-              probedPos
-            });
-            if (this.probeState.probePoints.length > 0 && this.probeState.probedPositions.length < this.probeState.probePoints.length) {
+            if (probingActive) {
+              const intended = this.probeState.probePoints[attempted];
+              const wasRetry = this.probeState.retryIndex > 0;
+              // Store EVERY measurement at the intended grid node's XY and
+              // keep only the measured Z. The PRB-reported XY is quantised
+              // by the motor steps (e.g. commanded Y60 reads back 59.999),
+              // and mixing quantised values with exact node values creates
+              // near-duplicate grid lines 0.001 mm apart -- the rectangular
+              // grid degenerates and compensation falls back to the slow
+              // plane-fit path with a broken surface.
+              const probedPos = { x: intended.x, y: intended.y, z: measuredPos.z };
+              if (wasRetry) {
+                this.probeState.retriedCount = (this.probeState.retriedCount || 0) + 1;
+                log.debug('[autolevel] retry measurement stored at grid node', intended);
+              }
+
               const newProbedPositions = [...this.probeState.probedPositions, probedPos];
-              const isCompleted = newProbedPositions.length >= this.probeState.probePoints.length;
+              this.probeState.attempted = attempted + 1;
+              this.probeState.retryIndex = 0;
+              const isCompleted = this.probeState.attempted >= this.probeState.probePoints.length;
 
               if (this.probeState.probedPositions.length === 0) {
                 this.probeState.minZ = probedPos.z;
@@ -783,12 +874,20 @@ class GrblController {
 
               this.probeState.probedPositions = newProbedPositions;
 
-              log.debug(`[autolevel] Probed ${newProbedPositions.length}/${this.probeState.probePoints.length}: posX=${probedPos.x.toFixed(3)}, posY=${probedPos.y.toFixed(3)}, posZ=${probedPos.z.toFixed(3)}`);
+              log.debug(`[autolevel] Probed ${newProbedPositions.length}/${this.probeState.probePoints.length}` +
+                (wasRetry ? ' (nearby retry, stored at grid node)' : '') +
+                `: posX=${probedPos.x.toFixed(3)}, posY=${probedPos.y.toFixed(3)}, posZ=${probedPos.z.toFixed(3)}`);
 
               this.emit('autolevel:update', {
-                current: newProbedPositions.length,
+                current: this.probeState.attempted,
                 total: this.probeState.probePoints.length,
                 probedPos: { ...probedPos },
+                // Where the probe REALLY touched. Differs from probedPos only
+                // on a nearby retry; the visualizer draws it at its true spot.
+                measuredPos: { ...measuredPos },
+                wasRetry,
+                skippedCount: this.probeState.skippedPoints.length,
+                retriedCount: this.probeState.retriedCount || 0,
                 minZ: this.probeState.minZ,
                 maxZ: this.probeState.maxZ,
                 maxDeviation: this.probeState.maxZ - this.probeState.minZ,
@@ -797,6 +896,52 @@ class GrblController {
               if (isCompleted) {
                 this.emit('autolevel:complete');
                 log.info('[autolevel] Probing completed');
+              } else {
+                this.sendAutolevelProbe();
+              }
+            }
+          } else if (probingActive && this.probeState.skipUnprobed) {
+            // No contact at the current target. Try the next nearby
+            // candidate; only after all of them fail is the grid node
+            // recorded as skipped (compensation then interpolates it).
+            const MAX_RETRIES = 4;
+            const intended = this.probeState.probePoints[attempted] || null;
+
+            if (this.probeState.retryIndex < MAX_RETRIES) {
+              this.probeState.retryIndex += 1;
+              log.info(`[autolevel] No contact at point ${attempted + 1}/${this.probeState.probePoints.length}` +
+                ` -- retrying nearby (${this.probeState.retryIndex}/${MAX_RETRIES})`);
+              this.sendAutolevelProbe();
+            } else {
+              this.probeState.attempted = attempted + 1;
+              this.probeState.retryIndex = 0;
+              if (intended) {
+                this.probeState.skippedPoints = [...this.probeState.skippedPoints, { ...intended }];
+              }
+              const isCompleted = this.probeState.attempted >= this.probeState.probePoints.length;
+
+              log.info(`[autolevel] No contact at point ${this.probeState.attempted}/${this.probeState.probePoints.length}` +
+                (intended ? ` (X${intended.x} Y${intended.y})` : '') + ' and all nearby retries -- skipped');
+
+              this.emit('autolevel:update', {
+                current: this.probeState.attempted,
+                total: this.probeState.probePoints.length,
+                probedPos: null,
+                skippedPoint: intended,
+                skippedCount: this.probeState.skippedPoints.length,
+                retriedCount: this.probeState.retriedCount || 0,
+                minZ: this.probeState.minZ,
+                maxZ: this.probeState.maxZ,
+                maxDeviation: (this.probeState.maxZ !== null && this.probeState.minZ !== null)
+                  ? this.probeState.maxZ - this.probeState.minZ
+                  : null,
+              });
+
+              if (isCompleted) {
+                this.emit('autolevel:complete');
+                log.info('[autolevel] Probing completed');
+              } else {
+                this.sendAutolevelProbe();
               }
             }
           }
@@ -1778,6 +1923,8 @@ class GrblController {
             startZ,
             endZ,
             feedrate,
+            skipUnprobed = false,
+            serpentine = false,
           } = params;
 
           if (mode === 'test') {
@@ -1802,12 +1949,19 @@ class GrblController {
             startY,
             endY,
             stepY,
+            serpentine,
           });
 
           // Reset probe state
           this.probeState = {
             probedPositions: [],
             probePoints,
+            attempted: 0,
+            retryIndex: 0,
+            firstProbeSent: false,
+            skippedPoints: [],
+            retriedCount: 0,
+            skipUnprobed: !!skipUnprobed,
             minZ: null,
             maxZ: null,
             config: {
@@ -1824,29 +1978,12 @@ class GrblController {
             },
           };
 
-          log.info(`[autolevel:start] Start probing with ${probePoints.length} points`);
+          log.info(`[autolevel:start] Start probing with ${probePoints.length} points (sequential)`);
 
-          // Generate probe G-code
-          const probeGCodes = [];
-          probePoints.forEach((point, index) => {
-            const { x, y } = point;
-
-            probeGCodes.push(`(Auto Level: probing point ${index})`);
-
-            probeGCodes.push('G90');
-            probeGCodes.push(`G0 Z${clearanceZ}`);
-            probeGCodes.push(`G0 X${x} Y${y}`);
-            probeGCodes.push(`G0 Z${startZ}`);
-            if (index === 0) {
-              probeGCodes.push(`G38.2 Z${endZ} F${feedrate / 2}`);
-            } else {
-              probeGCodes.push(`G38.2 Z${endZ} F${feedrate}`);
-            }
-            probeGCodes.push(`G0 Z${clearanceZ}`);
-          });
-
-          log.info(`[autolevel:start] Starting probing with ${probePoints.length} points`);
-          this.command('gcode', probeGCodes);
+          // Points are sent one at a time: the PRB result of each probe
+          // decides whether to advance, retry a nearby spot, or record a
+          // skip. See sendAutolevelProbe().
+          this.sendAutolevelProbe();
         },
         'autolevel:stop': () => {
           // Reset the machine to cancel the probe cycle immediately
@@ -1856,6 +1993,12 @@ class GrblController {
           this.probeState = {
             probedPositions: [],
             probePoints: [],
+            attempted: 0,
+            retryIndex: 0,
+            firstProbeSent: false,
+            skippedPoints: [],
+            retriedCount: 0,
+            skipUnprobed: false,
             minZ: null,
             maxZ: null,
             config: null,

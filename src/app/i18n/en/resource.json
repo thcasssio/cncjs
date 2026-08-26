@@ -643,5 +643,13 @@
   "Clearance Z: {{value}} {{- units}}": "Clearance Z: {{value}} {{- units}}",
   "Start Z: {{value}} {{- units}}": "Start Z: {{value}} {{- units}}",
   "End Z: {{value}} {{- units}}": "End Z: {{value}} {{- units}}",
-  "None": "None"
+  "None": "None",
+    "Skip points with no contact": "Skip points with no contact",
+    "Probe with G38.3 instead of G38.2: when a grid point finds no conductive surface (a drilled hole, an already-milled area), nearby spots a quarter step away are probed and the measurement is stored at the original grid node. Only if all nearby spots also fail is the point skipped and later interpolated from its neighbors. The remaining grid is never shifted.": "Probe with G38.3 instead of G38.2: when a grid point finds no conductive surface (a drilled hole, an already-milled area), nearby spots a quarter step away are probed and the measurement is stored at the original grid node. Only if all nearby spots also fail is the point skipped and later interpolated from its neighbors. The remaining grid is never shifted.",
+    "({{skipped}} skipped, no contact)": "({{skipped}} skipped, no contact)",
+    "Skipped (no contact)": "Skipped (no contact)",
+    "({{retried}} recovered nearby)": "({{retried}} recovered nearby)",
+    "Recovered nearby:": "Recovered nearby:",
+    "Zigzag scan path": "Zigzag scan path",
+    "Probe odd rows right-to-left (serpentine) so the head continues from where the previous row ended instead of rapiding back to the start of X. Same points, same grid, roughly half the travel time.": "Probe odd rows right-to-left (serpentine) so the head continues from where the previous row ended instead of rapiding back to the start of X. Same points, same grid, roughly half the travel time."
 }

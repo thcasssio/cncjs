@@ -319,6 +319,12 @@ class AutolevelWidget extends PureComponent {
     handleProbeFeedrateChange: (event) => {
       this.setState({ feedrate: this.parseInputValue(event.target.value) });
     },
+    handleSkipUnprobedChange: (event) => {
+      this.setState({ skipUnprobed: event.target.checked });
+    },
+    handleSerpentineChange: (event) => {
+      this.setState({ serpentine: event.target.checked });
+    },
 
     // Probe operations
     showTestProbeConfirmation: () => {
@@ -349,6 +355,8 @@ class AutolevelWidget extends PureComponent {
         startY, endY, stepY,
         clearanceZ, startZ, endZ,
         feedrate,
+        skipUnprobed,
+        serpentine,
       } = this.state;
       // Calculate total points
       const numPointsX = Math.floor((endX - startX) / stepX) + 1;
@@ -359,10 +367,12 @@ class AutolevelWidget extends PureComponent {
       this.setState({
         probeState: PROBE_STATE_RUNNING,
         probedPositions: [],
+        probeMarkers: [],
         probeProgress: {
           current: 0,
           total: totalPoints,
           percentage: 0,
+          skipped: 0,
         },
       });
 
@@ -385,6 +395,8 @@ class AutolevelWidget extends PureComponent {
         startZ,
         endZ,
         feedrate,
+        skipUnprobed,
+        serpentine,
       });
 
       log.info('Starting probe sequence');
@@ -597,14 +609,30 @@ class AutolevelWidget extends PureComponent {
         startZ: mapValueToUnits(this.config.get('startZ', 5), units),
         endZ: mapValueToUnits(this.config.get('endZ', -5), units),
         feedrate: mapValueToUnits(this.config.get('feedrate', 5), units),
+        skipUnprobed: this.config.get('skipUnprobed', false),
+        serpentine: this.config.get('serpentine', false),
       });
     },
     'autolevel:update': (data) => {
       log.debug('Received autolevel:update event', data);
-      const { current, total, probedPos, minZ, maxZ, maxDeviation } = data;
+      const { current, total, probedPos, measuredPos, wasRetry, skippedPoint, skippedCount = 0, retriedCount = 0, minZ, maxZ, maxDeviation } = data;
 
       this.setState(state => {
-        const updatedPositions = [...state.probedPositions, probedPos];
+        // probedPos is null when the controller skipped a point with no
+        // contact (skipUnprobed); the compensation grid only ever sees
+        // real measurements, stored at their grid node's XY.
+        const updatedPositions = probedPos
+          ? [...state.probedPositions, probedPos]
+          : state.probedPositions;
+
+        // Markers tell the visual truth the grid cannot: where a nearby
+        // retry REALLY touched, and which nodes found nothing at all.
+        let updatedMarkers = state.probeMarkers || [];
+        if (probedPos && wasRetry && measuredPos) {
+          updatedMarkers = [...updatedMarkers, { type: 'retried', ...measuredPos, nodeX: probedPos.x, nodeY: probedPos.y }];
+        } else if (!probedPos && skippedPoint) {
+          updatedMarkers = [...updatedMarkers, { type: 'skipped', x: skippedPoint.x, y: skippedPoint.y, z: 0 }];
+        }
 
         // A new probe point was received from the controller (autolevel:update).
         // Incrementally update the 3D visualizer so the user can watch the
@@ -614,18 +642,24 @@ class AutolevelWidget extends PureComponent {
         log.debug(`Updating visualization with point ${current}/${total}:`, probedPos);
         pubsub.publish('autolevel:showProbeVisualization', {
           probeData: updatedPositions,
+          probeMarkers: updatedMarkers,
           config: { startX, startY, endX, endY, units, snapX: stepX / 2, snapY: stepY / 2, interactable: false },
         });
 
         return {
           probedPositions: updatedPositions,
+          probeMarkers: updatedMarkers,
           probeProgress: {
             current,
             total,
             percentage: Math.round((current / total) * 100),
+            skipped: skippedCount,
+            retried: retriedCount,
           },
           probeStats: {
-            points: current,
+            points: updatedPositions.length,
+            skipped: skippedCount,
+            retried: retriedCount,
             minZ,
             maxZ,
             maxDeviation,
@@ -740,6 +774,8 @@ class AutolevelWidget extends PureComponent {
 
   componentDidUpdate(prevProps, prevState) {
     const {
+      skipUnprobed,
+      serpentine,
       minimized, units, wizardView, probedPositions,
       stepX, stepY,
       startX, startY, endX, endY,
@@ -767,6 +803,8 @@ class AutolevelWidget extends PureComponent {
     this.config.set('startZ', toMetric(startZ));
     this.config.set('endZ', toMetric(endZ));
     this.config.set('feedrate', toMetric(feedrate));
+    this.config.set('skipUnprobed', !!skipUnprobed);
+    this.config.set('serpentine', !!serpentine);
 
     // Keep the 3D visualizer in sync whenever the probe configuration changes
     // while the user is on the Setup Probe or Probing view. Skipped on other
